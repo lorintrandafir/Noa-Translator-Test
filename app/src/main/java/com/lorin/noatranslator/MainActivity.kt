@@ -56,12 +56,15 @@ class MainActivity : ComponentActivity() {
     speechRecognizer.setRecognitionListener(object : RecognitionListener {
 
         override fun onResults(results: Bundle?) {
-            val texts = results?.getStringArrayList(
-                SpeechRecognizer.RESULTS_RECOGNITION
-            )
-            recognizedText = texts?.firstOrNull() ?: ""
-            listening = false
-        }
+    val texts = results?.getStringArrayList(
+        SpeechRecognizer.RESULTS_RECOGNITION
+    )
+    recognizedText = texts?.firstOrNull() ?: ""
+
+    if (listening) {
+        speechRecognizer.startListening(speechIntent)
+    }
+}
 
         override fun onPartialResults(partialResults: Bundle?) {
             val texts = partialResults?.getStringArrayList(
@@ -76,8 +79,10 @@ class MainActivity : ComponentActivity() {
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {}
         override fun onError(error: Int) {
-            listening = false
-        }
+    if (listening) {
+        speechRecognizer.startListening(speechIntent)
+    }
+}
         override fun onEvent(eventType: Int, params: Bundle?) {}
 
     })
