@@ -1,6 +1,9 @@
 package com.lorin.noatranslator
 
 import android.Manifest
+import android.content.Context
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -28,7 +31,17 @@ class MainActivity : ComponentActivity() {
             }
 
             var listening by remember { mutableStateOf(false) }
+            
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
+            var useBluetoothMic by remember {
+    mutableStateOf(false)
+}
+
+            val bluetoothMic = audioManager.availableCommunicationDevices.firstOrNull {
+    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+}
             val permissionLauncher =
                 rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestPermission()
@@ -45,6 +58,31 @@ class MainActivity : ComponentActivity() {
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text("NOA Translator 🇩🇪 ↔ 🇷🇴")
+                Spacer(modifier = Modifier.height(20.dp))
+
+Button(
+    onClick = {
+        if (bluetoothMic != null) {
+            useBluetoothMic = !useBluetoothMic
+
+            if (useBluetoothMic) {
+                audioManager.setCommunicationDevice(bluetoothMic)
+            } else {
+                audioManager.clearCommunicationDevice()
+            }
+        }
+    },
+    enabled = bluetoothMic != null
+) {
+    Text(
+        if (bluetoothMic == null)
+            "🎧 Căști Bluetooth nedetectate"
+        else if (useBluetoothMic)
+            "🎧 Microfon căști Bluetooth"
+        else
+            "📱 Microfon telefon"
+    )
+}
 
                 Spacer(modifier = Modifier.height(30.dp))
 
