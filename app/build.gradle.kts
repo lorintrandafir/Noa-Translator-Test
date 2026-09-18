@@ -10,7 +10,9 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-
+buildFeatures {
+    compose = true
+}
     defaultConfig {
         applicationId = "com.lorin.noatranslator"
         minSdk = 31
@@ -21,4 +23,7 @@ android {
 }
 
 dependencies {
+    implementation("androidx.activity:activity-compose:1.10.1")
+    implementation(platform("androidx.compose:compose-bom:2025.04.01"))
+    implementation("androidx.compose.material3:material3")
 }
