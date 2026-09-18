@@ -24,9 +24,23 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
+      - name: Restore signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.NOA_KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > noa-release.jks
 
-      - name: Build debug APK
-        run: gradle assembleDebug
+      - name: Build signed APK
+        env:
+          NOA_STORE_PASSWORD: ${{ secrets.NOA_KEYSTORE_PASSWORD }}
+          NOA_KEY_ALIAS: ${{ secrets.NOA_KEY_ALIAS }}
+          NOA_KEY_PASSWORD: ${{ secrets.NOA_KEY_PASSWORD }}
+        run: |
+          gradle assembleDebug \
+            -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/noa-release.jks" \
+            -Pandroid.injected.signing.store.password="$NOA_STORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$NOA_KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$NOA_KEY_PASSWORD"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
