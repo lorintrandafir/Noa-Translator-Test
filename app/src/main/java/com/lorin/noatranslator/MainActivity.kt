@@ -86,7 +86,6 @@ class MainActivity : ComponentActivity() {
         speechRecognizer.destroy()
     }
     }
-}
             
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
