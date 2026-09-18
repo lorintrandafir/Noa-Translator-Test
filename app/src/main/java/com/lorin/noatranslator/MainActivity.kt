@@ -41,7 +41,7 @@ class MainActivity : ComponentActivity() {
     SpeechRecognizer.createSpeechRecognizer(this@MainActivity)
 }
 
-            val speechIntent = remember {
+            val speechIntent: Intent = remember {
     Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(
             RecognizerIntent.EXTRA_LANGUAGE_MODEL,
@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "de-DE")
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
     }
+            }
     DisposableEffect(speechRecognizer) {
     speechRecognizer.setRecognitionListener(object : RecognitionListener {
 
