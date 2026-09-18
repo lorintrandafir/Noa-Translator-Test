@@ -6,6 +6,8 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.content.Intent
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -80,7 +82,11 @@ class MainActivity : ComponentActivity() {
         override fun onEndOfSpeech() {}
         override fun onError(error: Int) {
     if (listening) {
-        speechRecognizer.startListening(speechIntent)
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (listening) {
+                speechRecognizer.startListening(speechIntent)
+            }
+        }, 500)
     }
 }
         override fun onEvent(eventType: Int, params: Bundle?) {}
