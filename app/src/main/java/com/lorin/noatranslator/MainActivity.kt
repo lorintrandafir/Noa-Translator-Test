@@ -25,12 +25,22 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.google.mlkit.common.model.RemoteModelManager
+import com.google.mlkit.common.model.DownloadConditions
+import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.TranslateRemoteModel
+import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.TranslatorOptions
+import org.json.JSONArray
+import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
     private val handler = Handler(Looper.getMainLooper())
@@ -53,7 +63,17 @@ class MainActivity : ComponentActivity() {
     private var previousAudioMode: Int? = null
     private var watchdog: Runnable? = null
     private var active by mutableStateOf(false)
-    private var history by mutableStateOf("")
+    private var translationQueue = TranslationQueue()
+    private var entries by mutableStateOf(emptyList<TranscriptEntry>())
+    private var translationReady by mutableStateOf(false)
+    private var downloading by mutableStateOf(false)
+    private var translationStatus by mutableStateOf("Verific modelele de traducere…")
+    private var closed = false
+    private val translator by lazy {
+        Translation.getClient(TranslatorOptions.Builder()
+            .setSourceLanguage(TranslateLanguage.GERMAN)
+            .setTargetLanguage(TranslateLanguage.ROMANIAN).build())
+    }
     private var partial by mutableStateOf("")
     private var status by mutableStateOf("Microfon pregătit")
     private var bluetoothSelected by mutableStateOf(false)
@@ -63,7 +83,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        history = preferences.getString("history", "").orEmpty()
+        restoreTranscript()
+        checkTranslationModels()
         setContent {
             val microphonePermission = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestPermission()
@@ -79,14 +100,38 @@ class MainActivity : ComponentActivity() {
                 if (granted) toggleBluetooth()
                 else routeStatus = "Accesul Bluetooth nu a fost permis."
             }
+            var showTranslationInfo by remember { mutableStateOf(false) }
             val scroll = rememberScrollState()
             MaterialTheme {
+                if (showTranslationInfo) AlertDialog(
+                    onDismissRequest = { showTranslationInfo = false },
+                    title = { Text("Despre traducere") },
+                    text = { Text("Traducere automată Google Translate, realizată pe telefon prin ML Kit după descărcarea modelelor. Recunoașterea vocală poate necesita internet. Traducerile pot conține erori.\n\nGoogle nu oferă garanții privind traducerile, explicite sau implicite, inclusiv privind exactitatea, fiabilitatea, vandabilitatea, adecvarea pentru un anumit scop sau neîncălcarea drepturilor terților.") },
+                    confirmButton = { TextButton(onClick = { showTranslationInfo = false }) { Text("ÎNCHIDE") } },
+                    dismissButton = { TextButton(onClick = {
+                        startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://cloud.google.com/translate")))
+                    }) { Text("GOOGLE TRANSLATE") } }
+                )
                 Column(
                     Modifier.fillMaxSize().systemBarsPadding().verticalScroll(scroll).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("NOA Translator · 0.4", style = MaterialTheme.typography.titleLarge)
-                    Text("Transcriere germană · păstrează aplicația deschisă")
+                    Text("NOA Translator · 0.5", style = MaterialTheme.typography.titleLarge)
+                    Text("Germană → română · păstrează aplicația deschisă")
+                    TextButton(onClick = { showTranslationInfo = true }) { Text("Despre traducerea Google Translate") }
+                    Text(translationStatus)
+                    if (!translationReady) {
+                        Button(onClick = { prepareTranslation() }, enabled = !downloading) {
+                            Text(if (downloading) "DESCĂRCARE · AȘTEAPTĂ WI-FI" else "TRADU CU GOOGLE · PREGĂTEȘTE PE WI-FI")
+                        }
+                    }
+                    if (entries.any { it.failed }) {
+                        Button(onClick = {
+                            translationQueue.retryFailures()
+                            publishTranscript()
+                            pumpTranslation()
+                        }, enabled = translationReady) { Text("REÎNCEARCĂ TRADUCERILE") }
+                    }
                     Text(status)
                     Button(onClick = {
                         if (active) stopSession("Ascultare oprită. Textul este păstrat.")
@@ -117,20 +162,33 @@ class MainActivity : ComponentActivity() {
                     }
                     if (probeResult.isNotBlank()) Text(probeResult)
                     Button(onClick = {
-                        history = ""
+                        translationQueue.clear()
                         partial = ""
-                        saveHistory()
-                    }, enabled = !active && !probing && history.isNotEmpty()) {
+                        publishTranscript()
+                    }, enabled = !active && !probing && entries.isNotEmpty()) {
                         Text("ȘTERGE TEXTUL")
                     }
                     SelectionContainer {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Text(history.ifEmpty { "Aici vor apărea frazele recunoscute." })
+                            if (entries.isEmpty()) Text("Aici vor apărea frazele în germană și traducerile în română.")
+                            entries.forEach { entry ->
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("DE: ${entry.german}")
+                                    Text(when {
+                                        entry.provisional -> "Text provizoriu · netradus"
+                                        entry.romanian != null -> "RO: ${entry.romanian}"
+                                        entry.failed -> "Traducere nereușită · poți reîncerca"
+                                        !translationReady -> "RO: așteaptă pregătirea traducerii"
+                                        else -> "RO: se traduce…"
+                                    }, color = MaterialTheme.colorScheme.primary)
+                                    if (entry.romanian != null) Text("Traducere automată · powered by Google Translate", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
                             if (partial.isNotBlank()) Text("În curs: $partial")
                         }
                     }
                     Button(onClick = {
-                        val report = "NOA 0.4 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE}\n$routeStatus\n$level\n$probeResult\n$diagnostics"
+                        val report = "NOA 0.5 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE}\n$routeStatus\n$level\n$translationStatus\n$probeResult\n$diagnostics"
                         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         clipboard.setPrimaryClip(ClipData.newPlainText("Diagnostic NOA", report))
                         status = "Diagnostic copiat."
@@ -144,14 +202,91 @@ class MainActivity : ComponentActivity() {
     private fun hasPermission(permission: String) =
         checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
-    private fun saveHistory() {
-        preferences.edit().putString("history", history).apply()
+    private fun restoreTranscript() {
+        val saved = preferences.getString("bilingual_history", null)
+        val restored = saved?.let { json -> runCatching {
+            val array = JSONArray(json)
+            (0 until array.length()).map { index ->
+                val item = array.getJSONObject(index)
+                TranscriptEntry(index.toLong() + 1, item.getString("de"),
+                    if (item.isNull("ro")) null else item.getString("ro"),
+                    item.optBoolean("provisional"), item.optBoolean("failed"))
+            }
+        }.getOrNull() }
+        translationQueue = TranslationQueue(restored.orEmpty())
+        if (restored == null) {
+            preferences.getString("history", "").orEmpty().split("\n\n").forEach {
+                translationQueue.add(it.removePrefix("[provizoriu] "), it.startsWith("[provizoriu] "))
+            }
+        }
+        publishTranscript()
+    }
+
+    private fun publishTranscript() {
+        entries = translationQueue.entries
+        val json = JSONArray()
+        entries.forEach {
+            json.put(JSONObject().put("de", it.german).put("ro", it.romanian ?: JSONObject.NULL)
+                .put("provisional", it.provisional).put("failed", it.failed))
+        }
+        // Keep a plain-text copy for compatibility with the previous version.
+        val plain = entries.joinToString("\n\n") { (if (it.provisional) "[provizoriu] " else "") + it.german }
+        preferences.edit().putString("bilingual_history", json.toString()).putString("history", plain).apply()
     }
 
     private fun appendText(text: String) {
-        if (text.isBlank()) return
-        history = if (history.isBlank()) text.trim() else "$history\n\n${text.trim()}"
-        saveHistory()
+        translationQueue.add(text.removePrefix("[provizoriu] "), text.startsWith("[provizoriu] "))
+        publishTranscript()
+        pumpTranslation()
+    }
+
+    private fun checkTranslationModels() {
+        RemoteModelManager.getInstance().getDownloadedModels(TranslateRemoteModel::class.java)
+            .addOnSuccessListener { models ->
+                if (closed || downloading) return@addOnSuccessListener
+                val languages = models.map { it.language }.toSet()
+                translationReady = languages.containsAll(listOf(TranslateLanguage.GERMAN, TranslateLanguage.ROMANIAN))
+                translationStatus = if (translationReady) "Traducerea în română este pregătită · pe telefon"
+                    else "Conectează Wi-Fi și pregătește traducerea o singură dată."
+                pumpTranslation()
+            }.addOnFailureListener {
+                if (!closed && !downloading) translationStatus = "Pregătește traducerea prin Wi-Fi."
+            }
+    }
+
+    private fun prepareTranslation() {
+        if (closed || downloading) return
+        downloading = true
+        translationStatus = "Descarc modelele de traducere. Păstrează conexiunea Wi-Fi."
+        translator.downloadModelIfNeeded(DownloadConditions.Builder().requireWifi().build())
+            .addOnSuccessListener {
+                if (closed) return@addOnSuccessListener
+                downloading = false
+                translationReady = true
+                translationStatus = "Traducerea în română este pregătită · pe telefon"
+                logEvent("Modelele de traducere sunt pregătite")
+                pumpTranslation()
+            }.addOnFailureListener {
+                if (closed) return@addOnFailureListener
+                downloading = false
+                translationStatus = "Modelele nu s-au descărcat. Verifică Wi-Fi și spațiul liber, apoi reîncearcă."
+                logEvent("Descărcarea modelelor a eșuat")
+            }
+    }
+
+    private fun pumpTranslation() {
+        if (closed || !translationReady) return
+        val entry = translationQueue.next() ?: return
+        translator.translate(entry.german)
+            .addOnSuccessListener { translated -> finishTranslation(entry.id, translated) }
+            .addOnFailureListener { finishTranslation(entry.id, null) }
+    }
+
+    private fun finishTranslation(id: Long, translated: String?) {
+        if (closed || !translationQueue.complete(id, translated)) return
+        publishTranscript()
+        logEvent(if (translated.isNullOrBlank()) "Traducere nereușită" else "Traducere în română primită")
+        pumpTranslation()
     }
 
     private fun preservePartial() {
@@ -499,6 +634,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        closed = true
+        translator.close()
         active = false
         probe?.cancel()
         releaseRecognizer()

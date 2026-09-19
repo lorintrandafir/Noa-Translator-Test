@@ -1,12 +1,25 @@
 # NOA Translator Test
 
-Android German speech transcription prototype. The current build does not yet translate to Romanian or speak translations. Recognition uses the system speech service and may require internet access; this is not an offline engine.
+Android German speech transcription and Romanian text translation prototype. Version 0.5 uses Google Translate through ML Kit on-device translation (https://cloud.google.com/translate). It does not speak translations. Recognition uses the system speech service and may require internet access; this is not an offline engine.
 
 ## Build
 
 Use Java 17, Gradle 8.13 and Android SDK 35. Run `gradle testDebugUnitTest assembleDebug`. The existing GitHub Actions workflow builds and signs the APK on pushes to main. Download `Noa-Translator-Test-APK` from the successful workflow run.
 
 The Android module is `app`; the old top-level `src` directory is not compiled.
+
+## Version 0.5
+
+- German final phrases are translated to Romanian on the phone using ML Kit 17.0.3. Each phrase keeps its own original and translation, including repeated phrases.
+- Prepare translation once on Wi-Fi to download German and Romanian models. Translation works locally after download; system speech recognition can still require internet. Models can be downloaded again if removed by the system.
+- A serial asynchronous translation queue is independent of recognizer restart timers. Failure keeps the original and offers retry. Clear during translation cannot resurrect deleted text. Provisional speech is labelled and not translated.
+- Existing German history migrates into paired entries; originals, translations and pending work survive reopening. Recognition still stops in the background. Translation callbacks are ignored after Activity destruction and the translator is closed.
+- Translation status and success/failure events are included in diagnostics without phrase content.
+- Translation is automatic and may be inaccurate, especially for short fragments and names. No text-to-speech or background listening yet.
+
+### Phone check for 0.5
+
+Install over 0.4 without uninstalling. Connect Wi-Fi and press the translation preparation button. Wait for the ready message; existing final phrases should receive Romanian translations. Select headset and speak three distinct short German sentences. Confirm each DE line has its matching RO line. Pause 30 seconds and resume. Stop, reopen and check both languages persist. Clear while translations are pending and ensure old rows do not return. Build/unit tests do not validate model downloads, translation quality or real-device audio behavior.
 
 ## Version 0.4
 
