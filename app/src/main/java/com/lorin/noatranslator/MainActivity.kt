@@ -122,7 +122,7 @@ class MainActivity : ComponentActivity() {
                     Modifier.fillMaxSize().systemBarsPadding().verticalScroll(scroll).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("NOA Translator · 0.6", style = MaterialTheme.typography.titleLarge)
+                    Text("NOA Translator · 0.6.1", style = MaterialTheme.typography.titleLarge)
                     Text("Germană → română · păstrează aplicația deschisă")
                     TextButton(onClick = { showTranslationInfo = true }) { Text("Despre traducerea Google Translate") }
                     Text(translationStatus)
@@ -207,7 +207,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     Button(onClick = {
-                        val report = "NOA 0.6 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE}\n$routeStatus\n$level\n$translationStatus\n$probeResult\n$diagnostics"
+                        val report = "NOA 0.6.1 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE}\n$routeStatus\n$level\n$translationStatus\n$probeResult\n$diagnostics"
                         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         clipboard.setPrimaryClip(ClipData.newPlainText("Diagnostic NOA", report))
                         status = "Diagnostic copiat."
@@ -368,6 +368,7 @@ class MainActivity : ComponentActivity() {
         utteranceCount = 0
         finalizedAt = null
         diagnostics = ""
+        logEvent("Recunoaștere de-DE fără formatare; text provizoriu solicitat")
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prepareRoute { scheduleNext(700, "Pornesc microfonul…") }
     }
@@ -483,6 +484,7 @@ class MainActivity : ComponentActivity() {
                 override fun onError(error: Int) {
                     if (!isCurrent(ticket)) return
                     finalizedAt = SystemClock.elapsedRealtime()
+                    logEvent("Actualizări de text provizoriu înainte de eroare: $partialCount")
                     when (error) {
                         SpeechRecognizer.ERROR_NO_MATCH,
                         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
@@ -515,10 +517,6 @@ class MainActivity : ComponentActivity() {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "de-DE")
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                if (Build.VERSION.SDK_INT >= 33) {
-                    // Optional: providers can ignore formatting and partial-result requests.
-                    putExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING, RecognizerIntent.FORMATTING_OPTIMIZE_LATENCY)
-                }
             })
         } catch (_: SecurityException) {
             stopSession("Accesul la microfon a fost refuzat. Verifică permisiunile.")

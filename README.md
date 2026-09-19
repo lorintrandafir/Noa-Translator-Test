@@ -8,6 +8,14 @@ Use Java 17, Gradle 8.13 and Android SDK 35. Run `gradle testDebugUnitTest assem
 
 The Android module is `app`; the old top-level `src` directory is not compiled.
 
+## Version 0.6.1
+
+Compatibility investigation after the HONOR/Android 16 test of 0.6 returned eight consecutive NO_MATCH errors and no logged partial or final text. The screenshot contains a saved translation, but the supplied session log does not show any new successful result. This does not prove microphone failure or a formatting incompatibility.
+
+- Removes the optional formatting extra introduced in 0.6, restoring exactly the recognition intent extras used by 0.5. Retains live previews, translation, Bluetooth routing, retry timings and history.
+- Logs the recognition configuration on Start and the partial update count on error, including zero, so a later test can distinguish missing intermediate results from translation failures.
+- This is a targeted compatibility rollback, not a confirmed fix. Test the same clip and microphone setup as 0.5; also speak one short German phrase yourself. Install over 0.6 without uninstalling. Copy diagnostics after stopping.
+
 ## Version 0.6
 
 - Shows a labelled, temporary DE/RO preview while speaking, when the speech provider supplies partial text. Requests optional Android 13+ punctuation/capitalization with the latency optimization strategy; unsupported providers may ignore it.
