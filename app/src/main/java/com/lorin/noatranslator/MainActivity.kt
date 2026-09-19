@@ -39,6 +39,8 @@ class MainActivity : ComponentActivity() {
     private val retryPolicy = RetryPolicy()
     private var finishing = false
     private var utteranceCount = 0
+    private var utteranceStartedAt = 0L
+    private var finalizedAt: Long? = null
     private var lastRmsUpdate = 0L
     private var level by mutableStateOf("Nivel vocal: încă neraportat")
     private var diagnostics by mutableStateOf("")
@@ -83,7 +85,7 @@ class MainActivity : ComponentActivity() {
                     Modifier.fillMaxSize().systemBarsPadding().verticalScroll(scroll).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("NOA Translator · 0.3", style = MaterialTheme.typography.titleLarge)
+                    Text("NOA Translator · 0.4", style = MaterialTheme.typography.titleLarge)
                     Text("Transcriere germană · păstrează aplicația deschisă")
                     Text(status)
                     Button(onClick = {
@@ -128,7 +130,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     Button(onClick = {
-                        val report = "NOA 0.3 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE}\n$routeStatus\n$level\n$probeResult\n$diagnostics"
+                        val report = "NOA 0.4 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE}\n$routeStatus\n$level\n$probeResult\n$diagnostics"
                         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         clipboard.setPrimaryClip(ClipData.newPlainText("Diagnostic NOA", report))
                         status = "Diagnostic copiat."
@@ -170,6 +172,7 @@ class MainActivity : ComponentActivity() {
         active = true
         retryPolicy.reset()
         utteranceCount = 0
+        finalizedAt = null
         diagnostics = ""
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prepareRoute { scheduleNext(700, "Pornesc microfonul…") }
@@ -223,6 +226,7 @@ class MainActivity : ComponentActivity() {
         val ticket = generation
         try {
             finishing = false
+            utteranceStartedAt = SystemClock.elapsedRealtime()
             level = "Nivel vocal: încă neraportat de serviciu"
             utteranceCount++
             logEvent("Sesiune $utteranceCount")
@@ -233,6 +237,9 @@ class MainActivity : ComponentActivity() {
                     if (!isCurrent(ticket)) return
                     status = "🎙 Ascult în germană…"
                     logEvent("Serviciul este pregătit")
+                    finalizedAt?.let {
+                        logEvent("De la finalizarea precedentă la pregătire: ${SystemClock.elapsedRealtime() - it} ms")
+                    }
                     if (!finishing) armWatchdog(ticket, 12_000)
                 }
 
@@ -262,17 +269,19 @@ class MainActivity : ComponentActivity() {
                 override fun onResults(results: Bundle?) {
                     if (!isCurrent(ticket)) return
                     val text = bestText(results)
+                    finalizedAt = SystemClock.elapsedRealtime()
                     if (text.isNotBlank()) {
                         appendText(text)
                         partial = ""
                         retryPolicy.reset()
                         logEvent("Rezultat final primit (${text.length} caractere)")
-                        scheduleNext(800, "Reiau ascultarea…")
+                        scheduleNext(RetryPolicy.RESTART_DELAY_MS, "Reiau ascultarea…")
                     } else retryWithoutText("Rezultat gol")
                 }
 
                 override fun onError(error: Int) {
                     if (!isCurrent(ticket)) return
+                    finalizedAt = SystemClock.elapsedRealtime()
                     when (error) {
                         SpeechRecognizer.ERROR_NO_MATCH,
                         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
@@ -293,7 +302,7 @@ class MainActivity : ComponentActivity() {
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastRmsUpdate >= 250) {
                         lastRmsUpdate = now
-                        level = "Nivel raportat de serviciu: %.1f dB (nu identifică microfonul)".format(rmsdB)
+                        level = "Nivel audio raportat de recunoaștere: %.1f dB".format(rmsdB)
                     }
                 }
                 override fun onBufferReceived(buffer: ByteArray?) {}
@@ -328,9 +337,12 @@ class MainActivity : ComponentActivity() {
 
     private fun retryWithoutText(reason: String) {
         preservePartial()
-        val delay = retryPolicy.withoutText()
-        if (delay == null) stopSession("$reason. Pauză după 4 sesiuni fără text. Folosește TEST MICROFON.")
-        else scheduleNext(delay, "$reason. Reiau în ${delay / 1000} s…")
+        val duration = SystemClock.elapsedRealtime() - utteranceStartedAt
+        val delay = retryPolicy.withoutText(duration)
+        logEvent("$reason; sesiune ${duration} ms")
+        if (delay == null) stopSession("Serviciul închide repetat sesiunile imediat. Oprit pentru a evita o buclă. Copiază diagnosticul.")
+        else if (delay == RetryPolicy.RESTART_DELAY_MS) scheduleNext(delay, "Reiau ascultarea…")
+        else scheduleNext(delay, "Serviciul a închis prea repede sesiunea. Reiau în $delay ms…")
     }
 
     private fun recover(reason: String, rateLimited: Boolean = false) {
@@ -351,9 +363,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun logEvent(message: String) {
-        val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT).format(java.util.Date())
+        val time = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.ROOT).format(java.util.Date())
         diagnostics = (diagnostics.lines().filter { it.isNotBlank() } + "$time $message")
-            .takeLast(35).joinToString("\n")
+            .takeLast(100).joinToString("\n")
     }
 
     private fun errorDescription(code: Int) = when (code) {

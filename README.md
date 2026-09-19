@@ -8,7 +8,24 @@ Use Java 17, Gradle 8.13 and Android SDK 35. Run `gradle testDebugUnitTest assem
 
 The Android module is `app`; the old top-level `src` directory is not compiled.
 
-## Version 0.3
+## Version 0.4
+
+Focus: reduce app-imposed gaps after the 0.3 phone test confirmed successful recognition with the headset selected and the phone in another room.
+
+- Normal results and normal-length empty/silence sessions restart after 150 ms (previously 800 ms for results and 1.5/3/4.5 seconds for empty sessions).
+- Normal silence no longer stops recognition after four empty sessions. Stop and background lifecycle handling still cancel pending restarts and release the recognizer.
+- An empty response in under 750 ms is treated as a possible provider rejection loop. Six consecutive such responses stop the loop, with increasing delays before that. This is a timing heuristic, not proof of an audio fault.
+- Actual service errors retain their independent five-attempt budget and rate limiting waits 30 seconds. Only successful text or an explicit new Start clears that budget.
+- Diagnostic events have millisecond timestamps and retain the last 100 entries. The final-result/error-to-next-ready interval is recorded; this is callback timing, not a direct measurement of continuous microphone capture.
+- The audio level label no longer says “does not identify the microphone”, which was easy to misread as an error. Communication routing still does not prove the speech provider's actual input.
+
+This remains utterance-based system recognition, not gapless streaming. Time spent waiting for final results and the provider's own startup latency can still lose speech. No changes to the recognition engine, Bluetooth routing, transcript storage or audio probe are included.
+
+### Phone check for 0.4
+
+With the headset selected, speak 10 short German phrases at a normal pace. Pause silently for 30 seconds, then speak again without pressing Start. Check which phrases are retained and copy the diagnostic after Stop. Also check Stop during a restart delay; it must remain stopped. Tests cover prolonged silence, rapid empty loops, mixed errors, retry reset and rate limits; hardware behavior still needs phone testing.
+
+## Version 0.3 (historical)
 
 Phone reports from 0.2 showed repeated empty recognition sessions and unconfirmed Bluetooth input. These reports do not establish the exact device/provider failure.
 
@@ -40,8 +57,8 @@ Automated tests cover empty-result and failure retry budgets, mixed error sequen
 
 ## Phone acceptance test
 
-1. Install 0.3 over the previous app; grant microphone permission. Say three separate German sentences with pauses. All three should remain visible.
-2. Leave a short silence, then speak again. Recognition should resume until four consecutive sessions without text cause an explicit diagnostic pause.
+1. Install 0.4 over the previous app; grant microphone permission. Say three separate German sentences with pauses. All three should remain visible.
+2. Leave silence for 30 seconds, then speak again. Normal silence should not stop recognition.
 3. Play a German video on the TV for 5 minutes with the app visible. Check that new phrases continue appearing and earlier phrases remain. System recognition consists of separate utterances and may miss words between restarts; this is not gapless streaming.
 4. Press Stop during a phrase or retry countdown. It must stay stopped; a partial phrase may remain labelled provisional. Start again and verify earlier text remains.
 5. Leave the app or rotate the phone. Return and verify saved text is present and the microphone is stopped; press Start to continue.

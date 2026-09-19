@@ -18,8 +18,8 @@ buildFeatures {
         applicationId = "com.lorin.noatranslator"
         minSdk = 31
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3"
+        versionCode = 4
+        versionName = "0.4"
     }
 }
 
@@ -29,4 +29,3 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2025.04.01"))
     implementation("androidx.compose.material3:material3")
 }
-
