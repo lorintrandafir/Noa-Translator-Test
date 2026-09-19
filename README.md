@@ -8,6 +8,18 @@ Use Java 17, Gradle 8.13 and Android SDK 35. Run `gradle testDebugUnitTest assem
 
 The Android module is `app`; the old top-level `src` directory is not compiled.
 
+## Version 0.6
+
+- Shows a labelled, temporary DE/RO preview while speaking, when the speech provider supplies partial text. Requests optional Android 13+ punctuation/capitalization with the latency optimization strategy; unsupported providers may ignore it.
+- Preview translation starts at most once per 1.2 seconds, allows only one in-flight preview, and coalesces changes to the latest text. Each translation is displayed with the exact German snapshot it translated; newer German text is labelled separately. Continuous partial updates do not endlessly debounce the preview.
+- Final results clear the preview and use the existing persistent translation queue. Preview callbacks from previous utterances, Stop, Clear or a destroyed Activity cannot reappear. Preview failures cannot cause retry loops or stop recognition. Previews are never committed as final translations.
+- Logs the first partial-result delay, partial update count and preview translation duration without transcript contents. Keeps the 12-second safety deadline and 150 ms restart behavior. This release does not claim sentence-perfect segmentation, improved model accuracy or gapless capture; it asks for punctuation and reduces display latency when partials are available.
+- Protects model-ready state from a late initial model-check callback after successful download.
+
+### Phone check for 0.6
+
+Install over 0.5. With translation ready, speak a longer German sentence and watch the labelled provisional DE/RO block below the microphone level. Check that the final translation is saved once, with no preview returning afterward. Repeat a phrase, stop during speech, and restart: old previews must not return. Test the same TV clip and copy diagnostics so partial support and timings can be checked. Previously downloaded models and history are reused. No guaranteed intermediate text if the speech provider withholds partial results. TTS remains unimplemented.
+
 ## Version 0.5
 
 - German final phrases are translated to Romanian on the phone using ML Kit 17.0.3. Each phrase keeps its own original and translation, including repeated phrases.

@@ -74,6 +74,12 @@ class MainActivity : ComponentActivity() {
             .setSourceLanguage(TranslateLanguage.GERMAN)
             .setTargetLanguage(TranslateLanguage.ROMANIAN).build())
     }
+    private val liveTranslation = LiveTranslation()
+    private val previewHandler = Handler(Looper.getMainLooper())
+    private var previewTask: Runnable? = null
+    private var previewGerman by mutableStateOf("")
+    private var previewRomanian by mutableStateOf("")
+    private var partialCount = 0
     private var partial by mutableStateOf("")
     private var status by mutableStateOf("Microfon pregătit")
     private var bluetoothSelected by mutableStateOf(false)
@@ -116,7 +122,7 @@ class MainActivity : ComponentActivity() {
                     Modifier.fillMaxSize().systemBarsPadding().verticalScroll(scroll).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("NOA Translator · 0.5", style = MaterialTheme.typography.titleLarge)
+                    Text("NOA Translator · 0.6", style = MaterialTheme.typography.titleLarge)
                     Text("Germană → română · păstrează aplicația deschisă")
                     TextButton(onClick = { showTranslationInfo = true }) { Text("Despre traducerea Google Translate") }
                     Text(translationStatus)
@@ -151,6 +157,18 @@ class MainActivity : ComponentActivity() {
                     }
                     Text(routeStatus)
                     Text(level)
+                    if (active && partial.isNotBlank()) {
+                        SelectionContainer {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("În curs · textul se poate modifica", style = MaterialTheme.typography.labelLarge)
+                                Text("DE: ${previewGerman.ifBlank { partial }}")
+                                Text(if (previewRomanian.isBlank()) "RO: aștept traducerea provizorie…" else "RO: $previewRomanian",
+                                    color = MaterialTheme.colorScheme.primary)
+                                if (previewGerman.isNotBlank() && previewGerman != partial) Text("DE actualizat: $partial", style = MaterialTheme.typography.bodySmall)
+                                if (previewRomanian.isNotBlank()) Text("Traducere automată · powered by Google Translate", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
                     Button(onClick = {
                         if (hasPermission(Manifest.permission.RECORD_AUDIO)) startProbe()
                         else {
@@ -163,6 +181,7 @@ class MainActivity : ComponentActivity() {
                     if (probeResult.isNotBlank()) Text(probeResult)
                     Button(onClick = {
                         translationQueue.clear()
+                        clearPreview()
                         partial = ""
                         publishTranscript()
                     }, enabled = !active && !probing && entries.isNotEmpty()) {
@@ -188,7 +207,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     Button(onClick = {
-                        val report = "NOA 0.5 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE}\n$routeStatus\n$level\n$translationStatus\n$probeResult\n$diagnostics"
+                        val report = "NOA 0.6 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE}\n$routeStatus\n$level\n$translationStatus\n$probeResult\n$diagnostics"
                         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         clipboard.setPrimaryClip(ClipData.newPlainText("Diagnostic NOA", report))
                         status = "Diagnostic copiat."
@@ -243,14 +262,15 @@ class MainActivity : ComponentActivity() {
     private fun checkTranslationModels() {
         RemoteModelManager.getInstance().getDownloadedModels(TranslateRemoteModel::class.java)
             .addOnSuccessListener { models ->
-                if (closed || downloading) return@addOnSuccessListener
+                if (closed || downloading || translationReady) return@addOnSuccessListener
                 val languages = models.map { it.language }.toSet()
                 translationReady = languages.containsAll(listOf(TranslateLanguage.GERMAN, TranslateLanguage.ROMANIAN))
                 translationStatus = if (translationReady) "Traducerea în română este pregătită · pe telefon"
                     else "Conectează Wi-Fi și pregătește traducerea o singură dată."
                 pumpTranslation()
+                schedulePreview()
             }.addOnFailureListener {
-                if (!closed && !downloading) translationStatus = "Pregătește traducerea prin Wi-Fi."
+                if (!closed && !downloading && !translationReady) translationStatus = "Pregătește traducerea prin Wi-Fi."
             }
     }
 
@@ -266,6 +286,7 @@ class MainActivity : ComponentActivity() {
                 translationStatus = "Traducerea în română este pregătită · pe telefon"
                 logEvent("Modelele de traducere sunt pregătite")
                 pumpTranslation()
+                schedulePreview()
             }.addOnFailureListener {
                 if (closed) return@addOnFailureListener
                 downloading = false
@@ -289,7 +310,45 @@ class MainActivity : ComponentActivity() {
         pumpTranslation()
     }
 
+    private fun clearPreview() {
+        previewHandler.removeCallbacksAndMessages(null)
+        previewTask = null
+        liveTranslation.clear()
+        previewGerman = ""
+        previewRomanian = ""
+    }
+
+    private fun schedulePreview() {
+        if (closed || !active || !translationReady || previewTask != null) return
+        val delay = liveTranslation.delay(SystemClock.elapsedRealtime()) ?: return
+        val task = Runnable {
+            previewTask = null
+            if (closed || !active || !translationReady) return@Runnable
+            val job = liveTranslation.next(SystemClock.elapsedRealtime()) ?: return@Runnable
+            val started = SystemClock.elapsedRealtime()
+            translator.translate(job.source)
+                .addOnSuccessListener { result ->
+                    if (closed) return@addOnSuccessListener
+                    if (liveTranslation.complete(job) && active && result.isNotBlank()) {
+                        // Keep the exact source next to its translation while newer text is pending.
+                        previewGerman = job.source
+                        previewRomanian = result
+                        logEvent("Traducere provizorie primită în ${SystemClock.elapsedRealtime() - started} ms")
+                    }
+                    schedulePreview()
+                }.addOnFailureListener {
+                    if (closed) return@addOnFailureListener
+                    liveTranslation.complete(job)
+                    logEvent("Traducere provizorie nereușită; rezultatul final se traduce separat")
+                    schedulePreview()
+                }
+        }
+        previewTask = task
+        previewHandler.postDelayed(task, delay)
+    }
+
     private fun preservePartial() {
+        clearPreview()
         if (partial.isNotBlank()) appendText("[provizoriu] $partial")
         partial = ""
     }
@@ -361,6 +420,7 @@ class MainActivity : ComponentActivity() {
         val ticket = generation
         try {
             finishing = false
+            partialCount = 0
             utteranceStartedAt = SystemClock.elapsedRealtime()
             level = "Nivel vocal: încă neraportat de serviciu"
             utteranceCount++
@@ -389,7 +449,11 @@ class MainActivity : ComponentActivity() {
                     val text = bestText(partialResults)
                     if (text.isNotBlank() && text != partial) {
                         partial = text
-                        // Keep the fixed utterance deadline even if partial text changes.
+                        partialCount++
+                        if (partialCount == 1) logEvent("Primul text provizoriu după ${SystemClock.elapsedRealtime() - utteranceStartedAt} ms")
+                        liveTranslation.update(text)
+                        schedulePreview()
+                        // The fixed watchdog remains independent of translation callbacks.
                     }
                 }
 
@@ -404,6 +468,8 @@ class MainActivity : ComponentActivity() {
                 override fun onResults(results: Bundle?) {
                     if (!isCurrent(ticket)) return
                     val text = bestText(results)
+                    clearPreview()
+                    logEvent("Actualizări de text provizoriu: $partialCount")
                     finalizedAt = SystemClock.elapsedRealtime()
                     if (text.isNotBlank()) {
                         appendText(text)
@@ -449,6 +515,10 @@ class MainActivity : ComponentActivity() {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "de-DE")
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                if (Build.VERSION.SDK_INT >= 33) {
+                    // Optional: providers can ignore formatting and partial-result requests.
+                    putExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING, RecognizerIntent.FORMATTING_OPTIMIZE_LATENCY)
+                }
             })
         } catch (_: SecurityException) {
             stopSession("Accesul la microfon a fost refuzat. Verifică permisiunile.")
@@ -635,6 +705,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         closed = true
+        clearPreview()
         translator.close()
         active = false
         probe?.cancel()
