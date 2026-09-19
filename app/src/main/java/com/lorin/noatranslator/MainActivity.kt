@@ -3,12 +3,16 @@ package com.lorin.noatranslator
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.pm.PackageManager
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -32,7 +36,19 @@ class MainActivity : ComponentActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
     private var generation = 0
-    private var failures = 0
+    private val retryPolicy = RetryPolicy()
+    private var finishing = false
+    private var utteranceCount = 0
+    private var lastRmsUpdate = 0L
+    private var level by mutableStateOf("Nivel vocal: încă neraportat")
+    private var diagnostics by mutableStateOf("")
+    private var probeResult by mutableStateOf("")
+    private var probing by mutableStateOf(false)
+    private var probe: MicrophoneProbe? = null
+    private var probeEpoch = 0
+    private var permissionForProbe = false
+    private var routeDeviceId: Int? = null
+    private var previousAudioMode: Int? = null
     private var watchdog: Runnable? = null
     private var active by mutableStateOf(false)
     private var history by mutableStateOf("")
@@ -50,7 +66,9 @@ class MainActivity : ComponentActivity() {
             val microphonePermission = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestPermission()
             ) { granted ->
-                if (granted) startSession()
+                if (granted) {
+                    if (permissionForProbe) startProbe() else startSession()
+                }
                 else status = "Permite accesul la microfon pentru a porni."
             }
             val bluetoothPermission = rememberLauncherForActivityResult(
@@ -62,40 +80,60 @@ class MainActivity : ComponentActivity() {
             val scroll = rememberScrollState()
             MaterialTheme {
                 Column(
-                    Modifier.fillMaxSize().systemBarsPadding().padding(20.dp),
+                    Modifier.fillMaxSize().systemBarsPadding().verticalScroll(scroll).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("NOA Translator · 0.2", style = MaterialTheme.typography.titleLarge)
-                    Text("Test de transcriere în germană")
+                    Text("NOA Translator · 0.3", style = MaterialTheme.typography.titleLarge)
+                    Text("Transcriere germană · păstrează aplicația deschisă")
                     Text(status)
                     Button(onClick = {
                         if (active) stopSession("Ascultare oprită. Textul este păstrat.")
                         else if (hasPermission(Manifest.permission.RECORD_AUDIO)) startSession()
-                        else microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
-                    }) {
+                        else {
+                            permissionForProbe = false
+                            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    }, enabled = !probing) {
                         Text(if (active) "OPREȘTE ASCULTAREA" else "PORNEȘTE ASCULTAREA")
                     }
                     Button(onClick = {
                         if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) toggleBluetooth()
                         else bluetoothPermission.launch(Manifest.permission.BLUETOOTH_CONNECT)
-                    }, enabled = !active) {
+                    }, enabled = !active && !probing) {
                         Text(if (bluetoothSelected) "REVINO LA TELEFON" else "FOLOSEȘTE CĂȘTILE BLUETOOTH")
                     }
                     Text(routeStatus)
-                    Text("Ține aplicația deschisă în timpul testului. Textul se păstrează între porniri.")
+                    Text(level)
+                    Button(onClick = {
+                        if (hasPermission(Manifest.permission.RECORD_AUDIO)) startProbe()
+                        else {
+                            permissionForProbe = true
+                            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    }, enabled = !active && !probing) {
+                        Text(if (probing) "VORBEȘTE ACUM…" else "TEST MICROFON · 4 SECUNDE")
+                    }
+                    if (probeResult.isNotBlank()) Text(probeResult)
                     Button(onClick = {
                         history = ""
                         partial = ""
                         saveHistory()
-                    }, enabled = !active && history.isNotEmpty()) {
+                    }, enabled = !active && !probing && history.isNotEmpty()) {
                         Text("ȘTERGE TEXTUL")
                     }
-                    SelectionContainer(Modifier.weight(1f).verticalScroll(scroll)) {
+                    SelectionContainer {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Text(history.ifEmpty { "Aici vor apărea frazele recunoscute." })
                             if (partial.isNotBlank()) Text("În curs: $partial")
                         }
                     }
+                    Button(onClick = {
+                        val report = "NOA 0.3 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE}\n$routeStatus\n$level\n$probeResult\n$diagnostics"
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Diagnostic NOA", report))
+                        status = "Diagnostic copiat."
+                    }, enabled = !active && !probing) { Text("COPIAZĂ DIAGNOSTICUL") }
+                    SelectionContainer { Text(diagnostics, style = MaterialTheme.typography.bodySmall) }
                 }
             }
         }
@@ -120,7 +158,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startSession() {
-        if (active) return
+        if (active || probing) return
         if (!hasPermission(Manifest.permission.RECORD_AUDIO)) {
             status = "Accesul la microfon este necesar."
             return
@@ -130,9 +168,11 @@ class MainActivity : ComponentActivity() {
             return
         }
         active = true
-        failures = 0
+        retryPolicy.reset()
+        utteranceCount = 0
+        diagnostics = ""
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        scheduleNext(0, "Pornesc microfonul…")
+        prepareRoute { scheduleNext(700, "Pornesc microfonul…") }
     }
 
     // Invalidate callbacks BEFORE cancel/destroy; old callbacks must never restart a session.
@@ -148,10 +188,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun scheduleNext(delay: Long, message: String) {
-        releaseRecognizer()
+    private fun scheduleNext(delay: Long, message: String, recreate: Boolean = false) {
+        // Normal terminal callbacks allow reusing the service. Only faults tear it down.
+        if (recreate) releaseRecognizer()
+        else {
+            generation++
+            handler.removeCallbacksAndMessages(null)
+            watchdog = null
+        }
         if (!active) return
         status = message
+        logEvent(message)
         val ticket = generation
         handler.postDelayed({
             if (active && ticket == generation) beginUtterance()
@@ -163,7 +210,10 @@ class MainActivity : ComponentActivity() {
     private fun armWatchdog(ticket: Int, delay: Long) {
         watchdog?.let { handler.removeCallbacks(it) }
         val task = Runnable {
-            if (isCurrent(ticket)) recover("Recunoașterea nu mai răspunde")
+            if (isCurrent(ticket)) {
+                if (finishing) recover("Nu a venit rezultatul final")
+                else finishUtterance(ticket)
+            }
         }
         watchdog = task
         handler.postDelayed(task, delay)
@@ -172,19 +222,24 @@ class MainActivity : ComponentActivity() {
     private fun beginUtterance() {
         val ticket = generation
         try {
-            val engine = SpeechRecognizer.createSpeechRecognizer(this)
+            finishing = false
+            level = "Nivel vocal: încă neraportat de serviciu"
+            utteranceCount++
+            logEvent("Sesiune $utteranceCount")
+            val engine = recognizer ?: SpeechRecognizer.createSpeechRecognizer(this)
             recognizer = engine
             engine.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
                     if (!isCurrent(ticket)) return
                     status = "🎙 Ascult în germană…"
-                    armWatchdog(ticket, 20_000)
+                    logEvent("Serviciul este pregătit")
+                    if (!finishing) armWatchdog(ticket, 12_000)
                 }
 
                 override fun onBeginningOfSpeech() {
                     if (!isCurrent(ticket)) return
-                    status = "🎙 Se aude vorbire…"
-                    armWatchdog(ticket, 30_000)
+                    status = "Serviciul a detectat începutul vorbirii…"
+                    logEvent("Început de vorbire")
                 }
 
                 override fun onPartialResults(partialResults: Bundle?) {
@@ -192,13 +247,15 @@ class MainActivity : ComponentActivity() {
                     val text = bestText(partialResults)
                     if (text.isNotBlank() && text != partial) {
                         partial = text
-                        armWatchdog(ticket, 20_000)
+                        // Keep the fixed utterance deadline even if partial text changes.
                     }
                 }
 
                 override fun onEndOfSpeech() {
                     if (!isCurrent(ticket)) return
                     status = "Procesez fraza…"
+                    finishing = true
+                    logEvent("Sfârșit de vorbire; aștept rezultatul")
                     armWatchdog(ticket, 10_000)
                 }
 
@@ -208,9 +265,10 @@ class MainActivity : ComponentActivity() {
                     if (text.isNotBlank()) {
                         appendText(text)
                         partial = ""
-                    } else preservePartial()
-                    failures = 0
-                    scheduleNext(350, "Reiau ascultarea…")
+                        retryPolicy.reset()
+                        logEvent("Rezultat final primit (${text.length} caractere)")
+                        scheduleNext(800, "Reiau ascultarea…")
+                    } else retryWithoutText("Rezultat gol")
                 }
 
                 override fun onError(error: Int) {
@@ -218,20 +276,26 @@ class MainActivity : ComponentActivity() {
                     when (error) {
                         SpeechRecognizer.ERROR_NO_MATCH,
                         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                            preservePartial()
-                            failures = 0
-                            scheduleNext(700, "Nu am auzit o frază clară. Reiau ascultarea…")
+                            retryWithoutText("${errorDescription(error)} (cod $error)")
                         }
                         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
                             stopSession("Accesul la microfon a fost refuzat. Verifică permisiunile.")
                         SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
                         SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
                             stopSession("Limba germană nu este disponibilă în serviciul vocal (eroare $error).")
-                        else -> recover("Eroare vocală $error")
+                        else -> recover("${errorDescription(error)} (cod $error)",
+                            error == SpeechRecognizer.ERROR_TOO_MANY_REQUESTS)
                     }
                 }
 
-                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onRmsChanged(rmsdB: Float) {
+                    if (!isCurrent(ticket) || !rmsdB.isFinite()) return
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastRmsUpdate >= 250) {
+                        lastRmsUpdate = now
+                        level = "Nivel raportat de serviciu: %.1f dB (nu identifică microfonul)".format(rmsdB)
+                    }
+                }
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEvent(eventType: Int, params: Bundle?) {}
             })
@@ -252,15 +316,28 @@ class MainActivity : ComponentActivity() {
     private fun bestText(bundle: Bundle?): String =
         bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim().orEmpty()
 
-    private fun recover(reason: String) {
+    private fun finishUtterance(ticket: Int) {
+        if (!isCurrent(ticket) || finishing) return
+        finishing = true
+        status = "Cer rezultatul frazei…"
+        logEvent("Cer finalizarea după limita sesiunii")
+        armWatchdog(ticket, 10_000)
+        try { recognizer?.stopListening() }
+        catch (_: RuntimeException) { recover("Nu pot finaliza sesiunea") }
+    }
+
+    private fun retryWithoutText(reason: String) {
         preservePartial()
-        failures++
-        if (failures >= 5) {
-            stopSession("$reason. Oprit după 5 încercări; verifică internetul și serviciul vocal, apoi pornește din nou.")
-        } else {
-            val delay = (1_000L shl (failures - 1)).coerceAtMost(8_000L)
-            scheduleNext(delay, "$reason. Reîncerc în ${delay / 1000} s ($failures/5)…")
-        }
+        val delay = retryPolicy.withoutText()
+        if (delay == null) stopSession("$reason. Pauză după 4 sesiuni fără text. Folosește TEST MICROFON.")
+        else scheduleNext(delay, "$reason. Reiau în ${delay / 1000} s…")
+    }
+
+    private fun recover(reason: String, rateLimited: Boolean = false) {
+        preservePartial()
+        val delay = retryPolicy.failure(rateLimited)
+        if (delay == null) stopSession("$reason. Oprit după erori repetate. Copiază diagnosticul.")
+        else scheduleNext(delay, "$reason. Reîncerc în ${delay / 1000} s…", recreate = true)
     }
 
     private fun stopSession(message: String) {
@@ -269,10 +346,101 @@ class MainActivity : ComponentActivity() {
         preservePartial()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         status = message
+        logEvent(message)
+        clearAudioRoute()
+    }
+
+    private fun logEvent(message: String) {
+        val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT).format(java.util.Date())
+        diagnostics = (diagnostics.lines().filter { it.isNotBlank() } + "$time $message")
+            .takeLast(35).joinToString("\n")
+    }
+
+    private fun errorDescription(code: Int) = when (code) {
+        SpeechRecognizer.ERROR_AUDIO -> "Eroare la captarea audio"
+        SpeechRecognizer.ERROR_NETWORK -> "Eroare de rețea"
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Rețeaua nu răspunde"
+        SpeechRecognizer.ERROR_SERVER -> "Eroare a serviciului vocal"
+        SpeechRecognizer.ERROR_CLIENT -> "Sesiune vocală întreruptă"
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Serviciul vocal este ocupat"
+        SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> "Serviciul a limitat cererile"
+        SpeechRecognizer.ERROR_NO_MATCH -> "Fără text recunoscut"
+        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Nu s-a detectat vorbire"
+        else -> "Eroare vocală"
+    }
+
+    // setCommunicationDevice accepts a request; wait for the actual communication route.
+    // This route still does not prove which input a separate speech service captures.
+    private fun prepareRoute(ready: () -> Unit) {
+        try {
+            if (!bluetoothSelected) {
+                clearAudioRoute()
+                routeStatus = "Telefon selectat; serviciul vocal își alege intrarea"
+                ready()
+                return
+            }
+            val device = audioManager.availableCommunicationDevices.firstOrNull { it.id == routeDeviceId }
+            if (device == null || !hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+                probing = false
+                stopSession("Căștile nu sunt disponibile. Reconectează-le sau selectează telefonul.")
+                return
+            }
+            previousAudioMode = audioManager.mode
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            if (!audioManager.setCommunicationDevice(device)) {
+                probing = false
+                stopSession("Android a refuzat conectarea microfonului Bluetooth.")
+                return
+            }
+            status = "Aștept conectarea audio a căștilor…"
+            val deadline = SystemClock.elapsedRealtime() + 6_000
+            val ticket = generation
+            fun checkRoute() {
+                if ((!active && !probing) || ticket != generation) return
+                val actual = runCatching { audioManager.communicationDevice }.getOrElse {
+                    probing = false
+                    stopSession("Nu pot verifica ruta Bluetooth. Verifică permisiunile.")
+                    return
+                }
+                if (actual?.id == device.id) {
+                    routeStatus = "Rută de comunicație: ${device.productName}. Intrarea vocală se verifică separat."
+                    logEvent("Ruta Bluetooth confirmată de Android")
+                    handler.postDelayed({ if ((active || probing) && ticket == generation) ready() }, 800)
+                } else if (SystemClock.elapsedRealtime() >= deadline) {
+                    probing = false
+                    stopSession("Conexiunea audio Bluetooth nu s-a stabilit în 6 secunde.")
+                } else handler.postDelayed({ checkRoute() }, 200)
+            }
+            checkRoute()
+        } catch (_: RuntimeException) {
+            probing = false
+            stopSession("Nu pot pregăti ruta audio. Verifică permisiunile și conexiunea căștilor.")
+        }
+    }
+
+    private fun startProbe() {
+        if (active || probing) return
+        probing = true
+        probeResult = "Pregătesc testul…"
+        releaseRecognizer()
+        prepareRoute {
+            status = "Vorbește timp de 4 secunde. Testul nu salvează sunetul."
+            val epoch = probeEpoch
+            probe = MicrophoneProbe(audioManager, bluetoothSelected) { report ->
+                probe = null
+                probing = false
+                if (epoch == probeEpoch) {
+                    probeResult = report
+                    status = "Test microfon încheiat."
+                    logEvent(report)
+                    clearAudioRoute()
+                }
+            }.also { it.start() }
+        }
     }
 
     private fun toggleBluetooth() {
-        if (active) return
+        if (active || probing) return
         try {
             if (bluetoothSelected) {
                 resetAudioRoute()
@@ -286,14 +454,9 @@ class MainActivity : ComponentActivity() {
                 routeStatus = "Nu am găsit căști cu microfon. Conectează-le și încearcă din nou."
                 return
             }
-            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-            if (audioManager.setCommunicationDevice(device)) {
-                bluetoothSelected = true
-                routeStatus = "Rutare către căști solicitată: ${device.productName}. Serviciul vocal poate folosi alt microfon."
-            } else {
-                resetAudioRoute()
-                routeStatus = "Telefonul nu a acceptat rutarea către căști."
-            }
+            bluetoothSelected = true
+            routeDeviceId = device.id
+            routeStatus = "Căști selectate: ${device.productName}"
         } catch (_: SecurityException) {
             resetAudioRoute()
             routeStatus = "Permite accesul la dispozitivele Bluetooth din setări."
@@ -301,20 +464,31 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun resetAudioRoute() {
-        runCatching { audioManager.clearCommunicationDevice() }
-        runCatching { audioManager.mode = AudioManager.MODE_NORMAL }
+        clearAudioRoute()
+        routeDeviceId = null
         bluetoothSelected = false
-        routeStatus = "Rutare audio implicită (telefon)"
+        routeStatus = "Telefon selectat; verifică intrarea cu TEST MICROFON"
+    }
+
+    private fun clearAudioRoute() {
+        runCatching { audioManager.clearCommunicationDevice() }
+        previousAudioMode?.let { mode -> runCatching { audioManager.mode = mode } }
+        previousAudioMode = null
     }
 
     override fun onStop() {
+        probeEpoch++
         if (active) stopSession("Pauză: aplicația a trecut în fundal. Apasă PORNEȘTE pentru a continua.")
+        probe?.cancel()
+        handler.removeCallbacksAndMessages(null)
+        if (probing && probe == null) probing = false
         resetAudioRoute()
         super.onStop()
     }
 
     override fun onDestroy() {
         active = false
+        probe?.cancel()
         releaseRecognizer()
         super.onDestroy()
     }

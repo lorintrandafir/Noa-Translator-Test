@@ -36,7 +36,7 @@ jobs:
           NOA_KEY_ALIAS: ${{ secrets.NOA_KEY_ALIAS }}
           NOA_KEY_PASSWORD: ${{ secrets.NOA_KEY_PASSWORD }}
         run: |
-          gradle assembleDebug \
+          gradle testDebugUnitTest assembleDebug \
             -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/noa-release.jks" \
             -Pandroid.injected.signing.store.password="$NOA_STORE_PASSWORD" \
             -Pandroid.injected.signing.key.alias="$NOA_KEY_ALIAS" \
@@ -47,3 +47,4 @@ jobs:
         with:
           name: Noa-Translator-Test-APK
           path: app/build/outputs/apk/debug/*.apk
+
