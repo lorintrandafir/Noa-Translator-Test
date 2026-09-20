@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - codex/translation-audio-0.7
 
 jobs:
   build:
