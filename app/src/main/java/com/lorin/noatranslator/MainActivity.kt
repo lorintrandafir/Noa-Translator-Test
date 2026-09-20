@@ -44,6 +44,16 @@ import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
     private val handler = Handler(Looper.getMainLooper())
+    private val phraseHandler = Handler(Looper.getMainLooper())
+    private val finalTranslationHandler = Handler(Looper.getMainLooper())
+    private val phraseBuffer = PhraseBuffer()
+    private var phraseDraft by mutableStateOf("")
+    private var phraseTask: Runnable? = null
+    private var audioEnabled by mutableStateOf(false)
+    private var audioBusy by mutableStateOf(false)
+    private var audioStatus by mutableStateOf("Pregătesc vocea română…")
+    private var speech: RomanianSpeech? = null
+    private val speakEligible = mutableSetOf<Long>()
     private var recognizer: SpeechRecognizer? = null
     private var generation = 0
     private val retryPolicy = RetryPolicy()
@@ -91,6 +101,19 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         restoreTranscript()
         checkTranslationModels()
+        speech = RomanianSpeech(this, { audioStatus = it }, { speaking ->
+            val wasBusy = audioBusy
+            audioBusy = speaking
+            if (speaking && !wasBusy && active) {
+                // Pause capture so the app cannot translate its own Romanian playback.
+                releaseRecognizer()
+                preservePartial()
+                clearAudioRoute()
+                status = "Redau traducerea; ascultarea este în pauză."
+            } else if (!speaking && wasBusy && active && !closed) {
+                prepareRoute { scheduleNext(350, "Reiau ascultarea după redare…") }
+            }
+        })
         setContent {
             val microphonePermission = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestPermission()
@@ -122,7 +145,7 @@ class MainActivity : ComponentActivity() {
                     Modifier.fillMaxSize().systemBarsPadding().verticalScroll(scroll).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("NOA Translator · 0.6.1", style = MaterialTheme.typography.titleLarge)
+                    Text("NOA Translator · 0.7", style = MaterialTheme.typography.titleLarge)
                     Text("Germană → română · păstrează aplicația deschisă")
                     TextButton(onClick = { showTranslationInfo = true }) { Text("Despre traducerea Google Translate") }
                     Text(translationStatus)
@@ -138,6 +161,26 @@ class MainActivity : ComponentActivity() {
                             pumpTranslation()
                         }, enabled = translationReady) { Text("REÎNCEARCĂ TRADUCERILE") }
                     }
+                    Text(audioStatus)
+                    Button(onClick = {
+                        audioEnabled = !audioEnabled
+                        if (!audioEnabled) {
+                            speakEligible.clear()
+                            speech?.stop()
+                        }
+                    }, enabled = !bluetoothSelected && !probing) {
+                        Text(if (audioEnabled) "CITIRE AUTOMATĂ: PORNITĂ" else "CITIRE AUTOMATĂ: OPRITĂ")
+                    }
+                    Text("Pentru audio, folosește microfonul telefonului și selectează Soundcore ca ieșire multimedia în Android. Ascultarea face pauză în timpul redării.", style = MaterialTheme.typography.bodySmall)
+                    if (bluetoothSelected) Text("Revino la microfonul telefonului pentru citirea traducerilor.")
+                    if (audioBusy) Button(onClick = {
+                        speakEligible.clear()
+                        speech?.stop()
+                    }) { Text("OPREȘTE REDAREA") }
+                    TextButton(onClick = {
+                        runCatching { startActivity(Intent("com.android.settings.TTS_SETTINGS")) }
+                            .onFailure { audioStatus = "Deschide Setări Android și caută «Sinteză vocală»." }
+                    }) { Text("SETĂRI VOCE ROMÂNĂ") }
                     Text(status)
                     Button(onClick = {
                         if (active) stopSession("Ascultare oprită. Textul este păstrat.")
@@ -146,7 +189,7 @@ class MainActivity : ComponentActivity() {
                             permissionForProbe = false
                             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
                         }
-                    }, enabled = !probing) {
+                    }, enabled = !probing && (!audioBusy || active)) {
                         Text(if (active) "OPREȘTE ASCULTAREA" else "PORNEȘTE ASCULTAREA")
                     }
                     Button(onClick = {
@@ -157,6 +200,7 @@ class MainActivity : ComponentActivity() {
                     }
                     Text(routeStatus)
                     Text(level)
+                    if (phraseDraft.isNotBlank()) Text("DE · grupez pentru traducere: $phraseDraft")
                     if (active && partial.isNotBlank()) {
                         SelectionContainer {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -175,11 +219,17 @@ class MainActivity : ComponentActivity() {
                             permissionForProbe = true
                             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
                         }
-                    }, enabled = !active && !probing) {
+                    }, enabled = !active && !probing && !audioBusy) {
                         Text(if (probing) "VORBEȘTE ACUM…" else "TEST MICROFON · 4 SECUNDE")
                     }
                     if (probeResult.isNotBlank()) Text(probeResult)
                     Button(onClick = {
+                        speakEligible.clear()
+                        speech?.stop()
+                        phraseHandler.removeCallbacksAndMessages(null)
+                        phraseBuffer.take()
+                        phraseDraft = ""
+                        preferences.edit().remove("pending_phrase").apply()
                         translationQueue.clear()
                         clearPreview()
                         partial = ""
@@ -200,14 +250,20 @@ class MainActivity : ComponentActivity() {
                                         !translationReady -> "RO: așteaptă pregătirea traducerii"
                                         else -> "RO: se traduce…"
                                     }, color = MaterialTheme.colorScheme.primary)
-                                    if (entry.romanian != null) Text("Traducere automată · powered by Google Translate", style = MaterialTheme.typography.labelSmall)
+                                    if (entry.romanian != null) {
+                                        Text(if (ReviewedPhrases.translate(entry.german) == entry.romanian)
+                                            "Expresie verificată local" else "Traducere automată · powered by Google Translate",
+                                            style = MaterialTheme.typography.labelSmall)
+                                        TextButton(onClick = { speech?.speak(entry.romanian) },
+                                            enabled = !bluetoothSelected && !probing) { Text("ASCULTĂ ÎN ROMÂNĂ") }
+                                    }
                                 }
                             }
                             if (partial.isNotBlank()) Text("În curs: $partial")
                         }
                     }
                     Button(onClick = {
-                        val report = "NOA 0.6.1 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE}\n$routeStatus\n$level\n$translationStatus\n$probeResult\n$diagnostics"
+                        val report = "NOA 0.7 | ${Build.MANUFACTURER} ${Build.MODEL} | Android ${Build.VERSION.RELEASE}\n$routeStatus\n$level\n$translationStatus\n$audioStatus\n$probeResult\n$diagnostics"
                         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         clipboard.setPrimaryClip(ClipData.newPlainText("Diagnostic NOA", report))
                         status = "Diagnostic copiat."
@@ -238,6 +294,10 @@ class MainActivity : ComponentActivity() {
                 translationQueue.add(it.removePrefix("[provizoriu] "), it.startsWith("[provizoriu] "))
             }
         }
+        preferences.getString("pending_phrase", null)?.takeIf { it.isNotBlank() }?.let {
+            translationQueue.add(it)
+            preferences.edit().remove("pending_phrase").apply()
+        }
         publishTranscript()
     }
 
@@ -254,9 +314,33 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun appendText(text: String) {
-        translationQueue.add(text.removePrefix("[provizoriu] "), text.startsWith("[provizoriu] "))
+        val id = translationQueue.add(text.removePrefix("[provizoriu] "), text.startsWith("[provizoriu] "))
+        if (id != null && active && audioEnabled && !text.startsWith("[provizoriu] ")) speakEligible.add(id)
         publishTranscript()
         pumpTranslation()
+    }
+
+    private fun bufferFinal(text: String) {
+        phraseBuffer.add(text, SystemClock.elapsedRealtime())
+        phraseDraft = phraseBuffer.text
+        preferences.edit().putString("pending_phrase", phraseDraft).apply()
+        schedulePhrase()
+    }
+
+    private fun schedulePhrase() {
+        phraseTask?.let { phraseHandler.removeCallbacks(it) }
+        phraseTask = null
+        val delay = phraseBuffer.delay(SystemClock.elapsedRealtime()) ?: return
+        phraseTask = Runnable { flushPhrase() }.also { phraseHandler.postDelayed(it, delay) }
+    }
+
+    private fun flushPhrase() {
+        phraseTask?.let { phraseHandler.removeCallbacks(it) }
+        phraseTask = null
+        val text = phraseBuffer.take()
+        phraseDraft = ""
+        if (text.isNotBlank()) appendText(text)
+        preferences.edit().remove("pending_phrase").apply()
     }
 
     private fun checkTranslationModels() {
@@ -298,6 +382,12 @@ class MainActivity : ComponentActivity() {
     private fun pumpTranslation() {
         if (closed || !translationReady) return
         val entry = translationQueue.next() ?: return
+        val reviewed = ReviewedPhrases.translate(entry.german)
+        if (reviewed != null) {
+            // Post completion to avoid recursive pumping of a long restored history.
+            finalTranslationHandler.post { finishTranslation(entry.id, reviewed) }
+            return
+        }
         translator.translate(entry.german)
             .addOnSuccessListener { translated -> finishTranslation(entry.id, translated) }
             .addOnFailureListener { finishTranslation(entry.id, null) }
@@ -306,6 +396,8 @@ class MainActivity : ComponentActivity() {
     private fun finishTranslation(id: Long, translated: String?) {
         if (closed || !translationQueue.complete(id, translated)) return
         publishTranscript()
+        if (speakEligible.remove(id) && active && audioEnabled && !translated.isNullOrBlank() &&
+            entries.any { it.id == id && !it.provisional }) speech?.speak(translated)
         logEvent(if (translated.isNullOrBlank()) "Traducere nereușită" else "Traducere în română primită")
         pumpTranslation()
     }
@@ -348,6 +440,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun preservePartial() {
+        flushPhrase()
         clearPreview()
         if (partial.isNotBlank()) appendText("[provizoriu] $partial")
         partial = ""
@@ -394,7 +487,7 @@ class MainActivity : ComponentActivity() {
             handler.removeCallbacksAndMessages(null)
             watchdog = null
         }
-        if (!active) return
+        if (!active || audioBusy) return
         status = message
         logEvent(message)
         val ticket = generation
@@ -418,6 +511,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun beginUtterance() {
+        if (!active || audioBusy) return
         val ticket = generation
         try {
             finishing = false
@@ -443,6 +537,8 @@ class MainActivity : ComponentActivity() {
                     if (!isCurrent(ticket)) return
                     status = "Serviciul a detectat începutul vorbirii…"
                     logEvent("Început de vorbire")
+                    phraseBuffer.speechActivity(SystemClock.elapsedRealtime())
+                    schedulePhrase()
                 }
 
                 override fun onPartialResults(partialResults: Bundle?) {
@@ -450,6 +546,8 @@ class MainActivity : ComponentActivity() {
                     val text = bestText(partialResults)
                     if (text.isNotBlank() && text != partial) {
                         partial = text
+                        phraseBuffer.speechActivity(SystemClock.elapsedRealtime())
+                        schedulePhrase()
                         partialCount++
                         if (partialCount == 1) logEvent("Primul text provizoriu după ${SystemClock.elapsedRealtime() - utteranceStartedAt} ms")
                         liveTranslation.update(text)
@@ -473,7 +571,7 @@ class MainActivity : ComponentActivity() {
                     logEvent("Actualizări de text provizoriu: $partialCount")
                     finalizedAt = SystemClock.elapsedRealtime()
                     if (text.isNotBlank()) {
-                        appendText(text)
+                        bufferFinal(text)
                         partial = ""
                         retryPolicy.reset()
                         logEvent("Rezultat final primit (${text.length} caractere)")
@@ -557,7 +655,10 @@ class MainActivity : ComponentActivity() {
 
     private fun stopSession(message: String) {
         active = false
+        speakEligible.clear()
+        speech?.stop()
         releaseRecognizer()
+        flushPhrase()
         preservePartial()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         status = message
@@ -634,7 +735,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startProbe() {
-        if (active || probing) return
+        if (active || probing || audioBusy) return
         probing = true
         probeResult = "Pregătesc testul…"
         releaseRecognizer()
@@ -669,6 +770,9 @@ class MainActivity : ComponentActivity() {
                 routeStatus = "Nu am găsit căști cu microfon. Conectează-le și încearcă din nou."
                 return
             }
+            audioEnabled = false
+            speakEligible.clear()
+            speech?.stop()
             bluetoothSelected = true
             routeDeviceId = device.id
             routeStatus = "Căști selectate: ${device.productName}"
@@ -692,8 +796,11 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        speakEligible.clear()
+        audioEnabled = false
         probeEpoch++
         if (active) stopSession("Pauză: aplicația a trecut în fundal. Apasă PORNEȘTE pentru a continua.")
+        speech?.stop()
         probe?.cancel()
         handler.removeCallbacksAndMessages(null)
         if (probing && probe == null) probing = false
@@ -703,6 +810,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         closed = true
+        finalTranslationHandler.removeCallbacksAndMessages(null)
+        phraseHandler.removeCallbacksAndMessages(null)
+        speech?.close()
         clearPreview()
         translator.close()
         active = false

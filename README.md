@@ -1,12 +1,34 @@
 # NOA Translator Test
 
-Android German speech transcription and Romanian text translation prototype. Version 0.5 uses Google Translate through ML Kit on-device translation (https://cloud.google.com/translate). It does not speak translations. Recognition uses the system speech service and may require internet access; this is not an offline engine.
+Android German speech transcription, Romanian translation and optional offline Romanian speech playback prototype. Version 0.7 uses ML Kit on-device translation plus a small, explicitly labelled set of reviewed whole expressions. Recognition uses the system speech service and may require internet access; this is not an offline engine.
 
 ## Build
 
 Use Java 17, Gradle 8.13 and Android SDK 35. Run `gradle testDebugUnitTest assembleDebug`. The existing GitHub Actions workflow builds and signs the APK on pushes to main. Download `Noa-Translator-Test-APK` from the successful workflow run.
 
 The Android module is `app`; the old top-level `src` directory is not compiled.
+
+## Version 0.7 — grouped translation and Romanian audio
+
+- Groups adjacent final recognition fragments before translation: 1.4 seconds without reported speech activity, with an 8-second/300-character bound or terminal punctuation. This is a heuristic, not a guarantee of complete sentences or speaker separation. German words are preserved, including repetitions; partial results are never silently promoted to finals. Pending final text is saved and flushed on Stop/background.
+- Adds exact whole-expression Romanian translations for common greetings and thanks, including `danke schön` → `Mulțumesc frumos.` These rows are labelled as locally reviewed expressions. Arbitrary phrases continue through ML Kit; no global word substitutions or guessed reconstruction of `in Lorin`.
+- ML Kit translates German/Romanian via English; grouping may help context but cannot repair the underlying model. It is not equivalent to online Google Translate. Source: https://developers.google.com/ml-kit/language/translation . Translation quality must be assessed on the device; no claim that the TV examples are all fixed.
+- Adds optional automatic reading of newly translated final phrases and an individual replay button. Existing history and provisional text are not automatically spoken. Audio starts disabled and is stopped on Stop/Clear/background. Switching off or cancelling audio prevents late pending translations from starting playback.
+- Selects an installed, offline Romanian Android TTS voice; missing voice/engine gives an actionable status and a button to Android TTS settings. Does not silently select a network voice. Playback is serialized, bounded to five waiting phrases and has a 60-second missing-callback timeout.
+- Uses the Android media output (select Soundcore in the system media-output selector); does not force a headset output or change the earbud DSP. Audio mode requires the phone microphone selection, avoiding the call route. Recognition pauses during speech playback and resumes afterward to prevent feedback. Words spoken during playback are not captured: this release is **not simultaneous interpretation**. Playback may use the phone speaker if that is the selected media output.
+- Foreground-only operation remains: locking the screen or leaving the app stops listening and playback. Pocket/background operation is not implemented.
+
+### Phone check for 0.7
+
+Install over 0.6.1 without uninstalling. The feature branch also runs the existing signed build workflow. Select the phone microphone in NOA; connect Soundcore as Android's media output. If needed install an offline Romanian voice in Android TTS settings and reopen NOA.
+
+1. Say `danke schön`, pause, and verify `Mulțumesc frumos.` plus the reviewed-expression label.
+2. With automatic reading OFF, replay the same TV fragment and compare grouped German/RO text with 0.6.1. This isolates translation from the deliberate audio pauses.
+3. Press `ASCULTĂ ÎN ROMÂNĂ` on one final row and verify Romanian speech is heard in Soundcore. Enable automatic reading, say one phrase, wait for the spoken translation, and then say another. Verify the mic resumes.
+4. Stop playback mid-phrase, stop listening while translation is pending, clear history, and leave/reopen the app. No cancelled or historical text should speak unexpectedly. Disconnect the headset and verify the selected Android media output before continuing.
+5. Missing Romanian voice must show a useful status, without blocking text translation or recognition.
+
+Automated tests cover grouping boundaries and conservative expression matching plus existing recognition retry and translation-queue tests. Android TTS voice availability, output routing, model quality and acoustic feedback require the physical phone.
 
 ## Version 0.6.1
 

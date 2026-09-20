@@ -15,8 +15,11 @@ class TranslationQueue(initial: List<TranscriptEntry> = emptyList()) {
     private var nextId = (initial.maxOfOrNull { it.id } ?: 0L) + 1
     private var running: Long? = null
 
-    fun add(text: String, provisional: Boolean = false) {
-        if (text.isNotBlank()) entries = entries + TranscriptEntry(nextId++, text.trim(), provisional = provisional)
+    fun add(text: String, provisional: Boolean = false): Long? {
+        if (text.isBlank()) return null
+        val id = nextId++
+        entries = entries + TranscriptEntry(id, text.trim(), provisional = provisional)
+        return id
     }
 
     fun next(): TranscriptEntry? {
